@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Material Reducer</title>
+<style>
+:root{--bg:#f6f5f2;--card:#fff;--tx:#1d1d1b;--mut:#6b6b66;--ac:#d9531e;--bd:#dcdad3;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161615;--card:#222221;--tx:#efeee9;--mut:#9a9992;--ac:#ff7a45;--bd:#3a3a38}}
+:root[data-theme="dark"]{--bg:#161615;--card:#222221;--tx:#efeee9;--mut:#9a9992;--ac:#ff7a45;--bd:#3a3a38}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:24px;margin:0 0 4px}
+p.s{color:var(--mut);margin:0 0 16px}
+.grid{display:grid;grid-template-columns:1.4fr 1fr;gap:16px}
+@media(max-width:800px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px}
+#view{height:440px;border-radius:10px;overflow:hidden;position:relative;background:#2a2a2a;touch-action:none}
+#view canvas{display:block;width:100%;height:100%}
+#drop{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;color:#ddd;padding:20px;cursor:pointer;border:2px dashed #666;border-radius:10px;margin:10px}
+#drop.on{border-color:var(--ac)}
+button,.btn{background:var(--ac);color:#fff;border:0;border-radius:8px;padding:9px 14px;font:inherit;font-weight:600;cursor:pointer}
+button.g{background:transparent;color:var(--tx);border:1px solid var(--bd)}
+button:disabled{opacity:.4;cursor:default}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
+label{font-size:14px}
+input[type=range]{flex:1;min-width:120px;accent-color:var(--ac)}
+.big{font-size:28px;font-weight:700}
+#list{max-height:300px;overflow:auto;font-size:13px}
+.it{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--bd)}
+.sw{width:16px;height:16px;border-radius:4px;border:1px solid var(--bd);flex:none}
+.it span.n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.it span.m{color:var(--mut);white-space:nowrap}
+#msg{color:var(--mut);font-size:13px;min-height:18px}
+</style>
+</head>
+<body>
+<main>
+<h1>Material Reducer</h1>
+<p class="s">Upload a GLB / glTF model (Sketchfab downloads work). It merges similar materials down to 15 or fewer.</p>
+<div class="grid">
+ <div class="card">
+  <div id="view"><div id="drop">Drop a .glb or .gltf here<br>or tap to choose a file</div></div>
+  <input id="file" type="file" accept=".glb,.gltf" hidden>
+  <div class="row"><button id="add">Add another file</button><button class="g" id="tog" disabled>Showing: optimized</button><span id="msg"></span></div>
+ </div>
+ <div class="card">
+  <div class="row"><div><div class="big" id="cnt">–</div><div style="color:var(--mut)">materials (before → after)</div></div></div>
+  <div class="row"><label for="t">Max materials: <b id="tv">15</b></label><input id="t" type="range" min="1" max="15" value="15"></div>
+  <div class="row"><label><input type="checkbox" id="keep"> Merged groups keep the biggest material’s texture</label></div>
+  <div class="row"><button id="exp" disabled>Download optimized .glb</button></div>
+  <div id="list"></div>
+ </div>
+</div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/GLTFExporter.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const view=$('view'),msg=t=>$('msg').textContent=t||'';
+const scene=new THREE.Scene(),cam=new THREE.PerspectiveCamera(45,1,.01,10000);
+const rend=new THREE.WebGLRenderer({antialias:true});
+rend.outputEncoding=THREE.sRGBEncoding;rend.setPixelRatio(Math.min(devicePixelRatio,2));
+view.appendChild(rend.domElement);
+const ctl=new THREE.OrbitControls(cam,rend.domElement);ctl.enableDamping=true;
+scene.add(new THREE.HemisphereLight(0xffffff,0x555566,1.1));
+const dl=new THREE.DirectionalLight(0xffffff,1.2);dl.position.set(3,5,4);scene.add(dl);
+const root=new THREE.Group();scene.add(root);
+scene.background=new THREE.Color(0x2a2a2a);
+function size(){const w=view.clientWidth,h=view.clientHeight;rend.setSize(w,h,false);cam.aspect=w/h;cam.updateProjectionMatrix()}
+addEventListener('resize',size);size();
+(function loop(){requestAnimationFrame(loop);ctl.update();rend.render(scene,cam)})();
+
+let meshes=[],mats=new Map(),showOpt=true,loaded=false;
+
+function texAvg(tex){
+  try{const im=tex.image;if(!im)return null;
+    const c=document.createElement('canvas');c.width=c.height=8;const x=c.getContext('2d');
+    x.drawImage(im,0,0,8,8);const d=x.getImageData(0,0,8,8).data;let r=0,g=0,b=0;
+    for(let i=0;i<d.length;i+=4){r+=d[i];g+=d[i+1];b+=d[i+2]}const n=d.length/4*255;
+    return [Math.pow(r/n,2.2),Math.pow(g/n,2.2),Math.pow(b/n,2.2)];
+  }catch(e){return null}
+}
+function feat(m){
+  const c=m.color?m.color.clone():new THREE.Color(.8,.8,.8);
+  let t=m.map?texAvg(m.map):null;if(t){c.r*=t[0];c.g*=t[1];c.b*=t[2]}
+  const e=m.emissive||new THREE.Color(0),ei=m.emissiveIntensity??1;
+  return [c.r,c.g,c.b,(m.roughness??.7)*.5,(m.metalness??0)*.8,e.r*ei*.5,e.g*ei*.5,e.b*ei*.5,m.transparent?(1-m.opacity)*4+3:0,m.side===THREE.DoubleSide?.3:0];
+}
+function toHex(v){const f=x=>Math.round(255*Math.pow(Math.min(Math.max(x,0),1),1/2.2));return '#'+[f(v[0]),f(v[1]),f(v[2])].map(n=>n.toString(16).padStart(2,'0')).join('')}
+
+function scan(){
+  meshes=[];mats=new Map();
+  root.traverse(o=>{
+    if(!o.isMesh)return;
+    if(!o.userData.orig)o.userData.orig=o.material;
+    meshes.push(o);
+    const tris=(o.geometry.index?o.geometry.index.count:o.geometry.attributes.position.count)/3;
+    [].concat(o.userData.orig).forEach(m=>{
+      let r=mats.get(m);if(!r){r={m,tris:0,f:feat(m)};mats.set(m,r)}r.tris+=tris;
+    });
+  });
+}
+
+function cluster(target){
+  let cl=[...mats.values()].map(r=>({mem:[r],w:Math.sqrt(r.tris+1),v:r.f.slice(),tris:r.tris}));
+  const d2=(a,b)=>a.v.reduce((s,x,i)=>s+(x-b.v[i])**2,0);
+  while(cl.length>target){
+    let bi=0,bj=1,best=Infinity;
+    for(let i=0;i<cl.length;i++)for(let j=i+1;j<cl.length;j++){
+      const a=cl[i],b=cl[j],c=a.w*b.w/(a.w+b.w)*d2(a,b);
+      if(c<best){best=c;bi=i;bj=j}
+    }
+    const a=cl[bi],b=cl[bj],w=a.w+b.w;
+    const n={mem:a.mem.concat(b.mem),w,tris:a.tris+b.tris,v:a.v.map((x,i)=>(x*a.w+b.v[i]*b.w)/w)};
+    cl.splice(bj,1);cl[bi]=n;
+  }
+  return cl;
+}
+
+function optimize(){
+  if(!loaded)return;
+  const target=+$('t').value,cl=cluster(target),map=new Map(),keep=$('keep').checked;
+  cl.forEach((c,i)=>{
+    let nm;
+    if(c.mem.length===1)nm=c.mem[0].m;
+    else{
+      const big=c.mem.reduce((a,b)=>a.tris>b.tris?a:b);
+      if(keep&&big.m.map){nm=big.m.clone();nm.name='merged_'+(i+1)}
+      else{
+        const v=c.v;
+        nm=new THREE.MeshStandardMaterial({color:new THREE.Color(v[0],v[1],v[2]),roughness:Math.min(v[3]*2,1),metalness:Math.min(v[4]/.8,1),
+          emissive:new THREE.Color(v[5]*2,v[6]*2,v[7]*2),side:v[9]>.15?THREE.DoubleSide:THREE.FrontSide});
+        if(v[8]>0){nm.transparent=true;nm.opacity=Math.max(0,1-(v[8]-3)/4)}
+        nm.name='merged_'+(i+1);
+      }
+    }
+    c.out=nm;c.mem.forEach(r=>map.set(r.m,nm));
+  });
+  meshes.forEach(o=>{const og=o.userData.orig;o.userData.opt=Array.isArray(og)?og.map(m=>map.get(m)):map.get(og)});
+  apply();
+  $('cnt').textContent=mats.size+' → '+cl.length;
+  $('list').innerHTML=cl.sort((a,b)=>b.tris-a.tris).map(c=>`<div class="it"><div class="sw" style="background:${toHex(c.v)}"></div><span class="n">${esc(c.out.name||'material')}</span><span class="m">${c.mem.length>1?'merged '+c.mem.length+' → 1':'kept'} · ${Math.round(c.tris)} tris</span></div>`).join('');
+  msg(mats.size<=target?'Already within the limit, nothing needed merging.':'Merged '+mats.size+' materials into '+cl.length+'.');
+  $('exp').disabled=false;$('tog').disabled=false;
+}
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function apply(){meshes.forEach(o=>o.material=showOpt?o.userData.opt:o.userData.orig);$('tog').textContent='Showing: '+(showOpt?'optimized':'original')}
+
+function fit(){
+  const b=new THREE.Box3().setFromObject(root),s=b.getSize(new THREE.Vector3()),c=b.getCenter(new THREE.Vector3());
+  const r=Math.max(s.x,s.y,s.z)||1;cam.near=r/1000;cam.far=r*100;cam.updateProjectionMatrix();
+  cam.position.copy(c).add(new THREE.Vector3(r*.9,r*.6,r*1.3));ctl.target.copy(c);ctl.update();
+}
+async function load(f){
+  if(!f)return;msg('Loading '+f.name+'…');$('drop').style.display='none';loaded=false;$('exp').disabled=true;$('tog').disabled=true;$('cnt').textContent='–';$('list').innerHTML='';
+  const buf=await f.arrayBuffer();
+  const isGlb=f.name.toLowerCase().endsWith('.glb');
+  new THREE.GLTFLoader().parse(isGlb?buf:new TextDecoder().decode(buf),'',g=>{
+    while(root.children.length)root.remove(root.children[0]);
+    root.add(g.scene);loaded=true;showOpt=true;scan();fit();optimize();
+  },e=>{msg('Could not load that file. Draco/meshopt-compressed or multi-file .gltf models are not supported; try the .glb download.');$('drop').style.display='flex';console.error(e)});
+}
+$('drop').onclick=()=>$('file').click();
+$('add').onclick=()=>$('file').click();
+$('file').onchange=e=>{const f=e.target.files[0];e.target.value='';load(f)};
+['dragover','dragenter'].forEach(ev=>view.addEventListener(ev,e=>{e.preventDefault();$('drop').classList.add('on')}));
+['dragleave','drop'].forEach(ev=>view.addEventListener(ev,e=>{e.preventDefault();$('drop').classList.remove('on')}));
+view.addEventListener('drop',e=>load(e.dataTransfer.files[0]));
+$('t').oninput=e=>{$('tv').textContent=e.target.value;optimize()};
+$('keep').onchange=optimize;
+$('tog').onclick=()=>{showOpt=!showOpt;apply()};
+$('exp').onclick=()=>{
+  msg('Exporting…');showOpt=true;apply();
+  new THREE.GLTFExporter().parse(root,res=>{
+    const url=URL.createObjectURL(new Blob([res],{type:'model/gltf-binary'}));
+    const l=document.createElement('a');l.href=url;l.download='optimized.glb';document.body.appendChild(l);l.click();l.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);msg('Downloaded optimized.glb');
+  },{binary:true,onlyVisible:false});
+};
+</script>
+</body>
+</html>
